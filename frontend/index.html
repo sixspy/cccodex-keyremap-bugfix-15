@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>实体键桥</title>
+<script src="/static/vue.global.prod.js"></script>
+<style>
+  :root{--bg:#1a1a1a;--panel:#111;--line:#333;--text:#f2f2f2;--muted:#9a9a9a;--accent:#ff7a18;--ok:#7CFC00;--bad:#ff4d4d}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","PingFang SC",sans-serif}
+  .top{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;background:#0d0d0d}
+  .top h1{margin:0;font-size:20px;letter-spacing:.04em}
+  .top h1 em{font-style:normal;color:var(--accent)}
+  .split{display:grid;grid-template-columns:1fr 18px 1fr;min-height:calc(100vh - 64px)}
+  .pane{padding:16px;overflow:auto}
+  .bridge{background:linear-gradient(180deg,transparent,#ff7a18,transparent);width:2px;margin:0 auto;position:relative}
+  .bridge:before{content:"重映";position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);background:#1a1a1a;color:var(--accent);font-size:11px;padding:4px 0;writing-mode:vertical-rl}
+  .box{border:1px solid var(--line);background:var(--panel);padding:12px;margin-bottom:12px}
+  .box h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  table{width:100%;border-collapse:collapse;font-size:12px;font-family:Consolas,monospace}
+  th,td{padding:8px 4px;border-bottom:1px solid #2a2a2a;text-align:left}
+  input{width:100%;background:#000;border:1px solid #444;color:#fff;padding:10px;font-family:Consolas,monospace;margin:6px 0 10px}
+  .primary{background:var(--accent);color:#111;border:0;padding:10px 12px;font-weight:700;cursor:pointer;width:100%}
+  .ghost{background:transparent;border:1px solid #666;color:#ddd;padding:6px 8px;cursor:pointer}
+  .login{max-width:420px;margin:14vh auto;background:#111;border:1px solid #333;padding:22px}
+  .err{color:var(--bad);min-height:18px;font-size:12px}
+  .pill{border:1px solid #444;padding:2px 6px;font-size:11px;color:var(--muted)}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}
+  .tabs{display:flex;gap:8px;margin-bottom:10px}
+  .tabs button{background:#000;border:1px solid #333;color:#aaa;padding:6px 8px;cursor:pointer}
+  .tabs button.on{border-color:var(--accent);color:var(--accent)}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<noscript><p style="padding:24px;background:#b91c1c;color:#fff">需要启用 JavaScript</p></noscript>
+<div id="boot-hint" style="display:none;padding:24px;font-family:sans-serif;background:#fef3c7;color:#111">页面脚本未加载。请确认可访问 /static/vue.global.prod.js</div>
+<script>
+setTimeout(function () {
+  if (!window.Vue) {
+    var e = document.getElementById("boot-hint");
+    if (e) e.style.display = "block";
+  }
+}, 800);
+</script>
+
+<script>
+const {createApp,ref,onMounted}=Vue;
+createApp({
+  setup(){
+    const token=ref(localStorage.getItem('keyremap_token')||'');
+    const user=ref(localStorage.getItem('keyremap_user')||'');
+    const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref('');
+    const leftTab=ref(0), rightTab=ref(0);
+    const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
+    const oldKey=ref('OLD-B1');
+    function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
+    async function login(){
+      err.value='';
+      const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:username.value,password:password.value})});
+      const j=await r.json(); if(!r.ok){err.value=j.detail||'登录失败';return;}
+      token.value=j.token; user.value=j.username;
+      localStorage.setItem('keyremap_token',j.token); localStorage.setItem('keyremap_user',j.username);
+      await refresh();
+    }
+    function logout(){token.value='';user.value='';localStorage.removeItem('keyremap_token');localStorage.removeItem('keyremap_user');}
+    async function loadJson(url){
+      const r=await fetch(url,{headers:auth()});
+      const j=await r.json().catch(()=>({}));
+      if(r.status===401){ logout(); return null; }
+      return j;
+    }
+    async function refresh(){
+      if(!token.value) return;
+      const v=await loadJson('/api/map-versions'); if(v===null) return;
+      versions.value=Array.isArray(v.items)?v.items:[];
+      const m=await loadJson('/api/mappings'); if(m===null) return;
+      mappings.value=Array.isArray(m.items)?m.items:[];
+      const f=await loadJson('/api/formal'); if(f===null) return;
+      formal.value=Array.isArray(f.items)?f.items:[];
+      const c=await loadJson('/api/conflicts'); if(c===null) return;
+      conflicts.value=Array.isArray(c.items)?c.items:[];
+    }
+    async function doRemap(){
+      actionErr.value='';
+      const r=await fetch('/api/remap',{method:'POST',headers:auth(),body:JSON.stringify({old_key:oldKey.value})});
+      const j=await r.json(); actionErr.value=r.ok?('正式键 '+j.entity_key):(j.detail||'失败');
+      await refresh();
+    }
+    onMounted(()=>{if(token.value)refresh();});
+    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+  },
+  template:`
+  <div v-if="!token" class="login">
+    <h1 style="margin-top:0">实体键<em style="color:#ff7a18;font-style:normal">桥</em></h1>
+    <p style="color:#9a9a9a">左侧映射，右侧正式区与冲突。入站旧键必须先重映。</p>
+    <label>用户名</label><input v-model="username"/><label>密码</label><input type="password" v-model="password"/>
+    <div class="err">{{err}}</div><button class="primary" @click="login">接通键桥</button>
+  </div>
+  <div v-if="token">
+    <div class="top">
+      <h1>实体键<em>桥</em> <span class="pill">旧键 → 正式键</span></h1>
+      <div>{{user}} <button class="ghost" @click="logout">退出</button></div>
+    </div>
+    <div class="split">
+      <div class="pane">
+        <div class="tabs">
+          <button :class="{on:leftTab===0}" @click="leftTab=0">映射版本</button>
+          <button :class="{on:leftTab===1}" @click="leftTab=1">执行重映</button>
+        </div>
+        <div class="box" v-show="leftTab===0">
+          <h2>Map Versions</h2>
+          <table><thead><tr><th>version</th><th>status</th><th>from</th></tr></thead>
+          <tbody><tr v-for="v in versions" :key="v.id"><td>{{v.version}}</td><td>{{v.status}}</td><td>{{v.effective_from}}</td></tr></tbody></table>
+          <h2 style="margin-top:14px">Mappings</h2>
+          <table><thead><tr><th>old</th><th>new</th><th>kind</th></tr></thead>
+          <tbody><tr v-for="m in mappings" :key="m.id"><td>{{m.old_key}}</td><td class="ok">{{m.new_key}}</td><td>{{m.kind}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="leftTab===1">
+          <h2>Ingress Remap</h2>
+          <label>old_key</label>
+          <input v-model="oldKey"/>
+          <button class="primary" @click="doRemap">重映入正式区</button>
+          <div class="err">{{actionErr}}</div>
+        </div>
+      </div>
+      <div class="bridge"></div>
+      <div class="pane">
+        <div class="tabs">
+          <button :class="{on:rightTab===0}" @click="rightTab=0">正式区</button>
+          <button :class="{on:rightTab===1}" @click="rightTab=1">冲突队列</button>
+        </div>
+        <div class="box" v-show="rightTab===0">
+          <h2>Formal Zone</h2>
+          <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>at</th></tr></thead>
+          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.created_at}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===1">
+          <h2>Conflicts</h2>
+          <table><thead><tr><th>old</th><th>reason</th><th>status</th></tr></thead>
+          <tbody><tr v-for="c in conflicts" :key="c.id"><td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td><td>{{c.status}}</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>`
+}).mount('#app');
+</script>
+</body>
+</html>
