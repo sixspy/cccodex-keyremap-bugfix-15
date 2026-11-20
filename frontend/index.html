@@ -51,8 +51,10 @@ createApp({
     const token=ref(localStorage.getItem('keyremap_token')||'');
     const user=ref(localStorage.getItem('keyremap_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), actionErr=ref('');
-    const leftTab=ref(0), rightTab=ref(0);
+    const leftTab=ref(0), rightTab=ref(1);
     const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
+    const staging=ref([]), cutovers=ref([]), activeCutover=ref(null), rejections=ref([]);
+    const attest=ref(null), contention=ref([]), lockHolder=ref(null), deviations=ref([]);
     const oldKey=ref('OLD-B1');
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
@@ -80,15 +82,36 @@ createApp({
       formal.value=Array.isArray(f.items)?f.items:[];
       const c=await loadJson('/api/conflicts'); if(c===null) return;
       conflicts.value=Array.isArray(c.items)?c.items:[];
+      const s=await loadJson('/api/staging'); if(s!==null) staging.value=Array.isArray(s.items)?s.items:[];
+      const co=await loadJson('/api/cutovers'); if(co!==null){cutovers.value=Array.isArray(co.items)?co.items:[]; activeCutover.value=co.active&&co.active.id?co.active:null;}
+      const rj=await loadJson('/api/rejections'); if(rj!==null) rejections.value=Array.isArray(rj.items)?rj.items:[];
+      const at=await loadJson('/api/attestation'); if(at!==null) attest.value=at;
+      const lc=await loadJson('/api/lock-contention'); if(lc!==null){contention.value=Array.isArray(lc.items)?lc.items:[]; lockHolder.value=lc.holder||null;}
+      const dv=await loadJson('/api/leak-deviations'); if(dv!==null) deviations.value=Array.isArray(dv.items)?dv.items:[];
     }
     async function doRemap(){
       actionErr.value='';
       const r=await fetch('/api/remap',{method:'POST',headers:auth(),body:JSON.stringify({old_key:oldKey.value})});
-      const j=await r.json(); actionErr.value=r.ok?('正式键 '+j.entity_key):(j.detail||'失败');
+      const j=await r.json();
+      actionErr.value=r.ok?(j.staged?('入暂存 #'+j.staging_id+'（待放行）'):('正式键 '+j.entity_key)):(j.detail||'失败');
+      await refresh();
+    }
+    async function startCutover(){
+      actionErr.value='';
+      const r=await fetch('/api/cutover/start',{method:'POST',headers:auth(),body:JSON.stringify({to_version:'m-2026.12'})});
+      const j=await r.json(); actionErr.value=r.ok?('切版中 → '+j.to_version):(j.detail||'失败');
+      await refresh();
+    }
+    async function closeCutover(){
+      actionErr.value='';
+      const r=await fetch('/api/cutover/close',{method:'POST',headers:auth(),body:JSON.stringify({})});
+      const j=await r.json(); actionErr.value=r.ok?('已收口 回执 '+j.receipt_no+' 放行 '+j.released_count):(j.detail||'失败');
       await refresh();
     }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,
+      staging,cutovers,activeCutover,rejections,attest,contention,lockHolder,deviations,oldKey,
+      login,logout,doRemap,startCutover,closeCutover};
   },
   template:`
   <div v-if="!token" class="login">
@@ -107,38 +130,81 @@ createApp({
         <div class="tabs">
           <button :class="{on:leftTab===0}" @click="leftTab=0">映射版本</button>
           <button :class="{on:leftTab===1}" @click="leftTab=1">执行重映</button>
+          <button :class="{on:leftTab===2}" @click="leftTab=2">切版台</button>
         </div>
         <div class="box" v-show="leftTab===0">
           <h2>Map Versions</h2>
           <table><thead><tr><th>version</th><th>status</th><th>from</th></tr></thead>
-          <tbody><tr v-for="v in versions" :key="v.id"><td>{{v.version}}</td><td>{{v.status}}</td><td>{{v.effective_from}}</td></tr></tbody></table>
+          <tbody><tr v-for="v in versions" :key="v.id"><td>{{v.version}}</td><td :class="v.status==='切版中'?'bad':''">{{v.status}}</td><td>{{v.effective_from}}</td></tr></tbody></table>
           <h2 style="margin-top:14px">Mappings</h2>
           <table><thead><tr><th>old</th><th>new</th><th>kind</th></tr></thead>
           <tbody><tr v-for="m in mappings" :key="m.id"><td>{{m.old_key}}</td><td class="ok">{{m.new_key}}</td><td>{{m.kind}}</td></tr></tbody></table>
         </div>
         <div class="box" v-show="leftTab===1">
-          <h2>Ingress Remap</h2>
+          <h2>Ingress Load</h2>
           <label>old_key</label>
           <input v-model="oldKey"/>
-          <button class="primary" @click="doRemap">重映入正式区</button>
+          <button class="primary" @click="doRemap">入站装载</button>
           <div class="err">{{actionErr}}</div>
+          <p style="color:var(--muted);font-size:11px;margin:8px 0 0" v-if="activeCutover">
+            窗口开启（{{activeCutover.to_version}}）：新到入站只进暂存，正式零增。
+          </p>
+        </div>
+        <div class="box" v-show="leftTab===2">
+          <h2>Cutover Console</h2>
+          <button class="primary" @click="startCutover" :disabled="!!activeCutover">开始切版</button>
+          <div style="height:8px"></div>
+          <button class="ghost" style="width:100%" @click="closeCutover" :disabled="!activeCutover">收口并放行暂存</button>
+          <p style="color:var(--muted);font-size:11px;margin:8px 0 0">
+            当前窗口：<span :class="activeCutover?'bad':'ok'">{{activeCutover?('切版中 → '+activeCutover.to_version):'未开启'}}</span>
+            　锁持有：<span class="pill">{{lockHolder||'空闲'}}</span>
+          </p>
+          <h2 style="margin-top:14px">切版记录</h2>
+          <table><thead><tr><th>from</th><th>to</th><th>status</th><th>回执</th></tr></thead>
+          <tbody><tr v-for="x in cutovers" :key="x.id"><td>{{x.from_version}}</td><td>{{x.to_version}}</td><td :class="x.status==='切版中'?'bad':''">{{x.status}}</td><td>{{x.receipt_no||'—'}}</td></tr></tbody></table>
         </div>
       </div>
       <div class="bridge"></div>
       <div class="pane">
         <div class="tabs">
           <button :class="{on:rightTab===0}" @click="rightTab=0">正式区</button>
-          <button :class="{on:rightTab===1}" @click="rightTab=1">冲突队列</button>
+          <button :class="{on:rightTab===1}" @click="rightTab=1">暂存区</button>
+          <button :class="{on:rightTab===2}" @click="rightTab=2">拒收凭证</button>
+          <button :class="{on:rightTab===3}" @click="rightTab=3">互证页</button>
         </div>
         <div class="box" v-show="rightTab===0">
           <h2>Formal Zone</h2>
           <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>at</th></tr></thead>
           <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.created_at}}</td></tr></tbody></table>
-        </div>
-        <div class="box" v-show="rightTab===1">
-          <h2>Conflicts</h2>
+          <h2 style="margin-top:14px">Conflicts</h2>
           <table><thead><tr><th>old</th><th>reason</th><th>status</th></tr></thead>
           <tbody><tr v-for="c in conflicts" :key="c.id"><td class="bad">{{c.old_key}}</td><td>{{c.reason}}</td><td>{{c.status}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===1">
+          <h2>Hold Staging (甲)</h2>
+          <table><thead><tr><th>old</th><th>target</th><th>ver</th><th>status</th></tr></thead>
+          <tbody><tr v-for="s in staging" :key="s.id"><td>{{s.old_key}}</td><td class="ok">{{s.target_key||'—'}}</td><td>{{s.version}}</td><td :class="s.status==='待放行'?'bad':'ok'">{{s.status}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===2">
+          <h2>Rejection Vouchers</h2>
+          <table><thead><tr><th>old</th><th>reason</th><th>at</th></tr></thead>
+          <tbody><tr v-for="r in rejections" :key="r.id"><td class="bad">{{r.old_key}}</td><td>{{r.reason}}</td><td>{{r.created_at}}</td></tr></tbody></table>
+          <h2 style="margin-top:14px">窗口锁争用</h2>
+          <table><thead><tr><th>route</th><th>arriving</th><th>blocked_by</th></tr></thead>
+          <tbody><tr v-for="x in contention" :key="x.id"><td>{{x.route}}</td><td>{{x.arriving}}</td><td>{{x.blocked_by||'—'}}</td></tr></tbody></table>
+          <h2 style="margin-top:14px">泄漏偏了</h2>
+          <table><thead><tr><th>detail</th><th>at</th></tr></thead>
+          <tbody><tr v-for="d in deviations" :key="d.id"><td class="bad">{{d.detail}}</td><td>{{d.created_at}}</td></tr></tbody></table>
+        </div>
+        <div class="box" v-show="rightTab===3">
+          <h2>Attestation</h2>
+          <p v-if="attest">
+            同态：<span :class="attest.consistent?'ok':'bad'">{{attest.consistent?'通过':'不一致'}}</span>
+            　暂存待放行 {{attest.staging['待放行']}} / 已放行 {{attest.staging['已放行']}}
+            　正式 {{attest.formal.rows}} 行，半成品 {{attest.formal.half_baked}}
+          </p>
+          <table v-if="attest"><thead><tr><th>check</th><th>结果</th></tr></thead>
+          <tbody><tr v-for="(v,k) in attest.checks" :key="k"><td>{{k}}</td><td :class="v?'ok':'bad'">{{v?'通过':'不通过'}}</td></tr></tbody></table>
         </div>
       </div>
     </div>
